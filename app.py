@@ -278,6 +278,39 @@ def fill_template():
             if upper_k not in subs:
                 subs[upper_k] = str(v) if v is not None else ""
 
+        # Fix race week: move RACE DAY to the correct day and clear all sessions after it
+        day_cols = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+        day_name_to_col = {
+            "Monday": "MON", "Tuesday": "TUE", "Wednesday": "WED",
+            "Thursday": "THU", "Friday": "FRI", "Saturday": "SAT", "Sunday": "SUN"
+        }
+        race_day_of_week = date_data.get("race_day_of_week", "")
+        total_weeks_int = int(date_data.get("total_weeks", 32))
+        final_wk_str = f"{total_weeks_int:02d}"
+
+        if race_day_of_week in day_name_to_col:
+            correct_col = day_name_to_col[race_day_of_week]
+            correct_idx = day_cols.index(correct_col)
+
+            # Find where Claude actually placed RACE DAY in the final week
+            race_content = None
+            claude_col = None
+            for col in day_cols:
+                val = subs.get(f"WK{final_wk_str}_{col}", "")
+                if "RACE DAY" in val.upper():
+                    race_content = val
+                    claude_col = col
+                    break
+
+            # Move RACE DAY to the correct column if misplaced
+            if race_content and claude_col != correct_col:
+                subs[f"WK{final_wk_str}_{claude_col}"] = "REST"
+                subs[f"WK{final_wk_str}_{correct_col}"] = race_content
+
+            # Clear all sessions after race day in the final week
+            for col in day_cols[correct_idx + 1:]:
+                subs[f"WK{final_wk_str}_{col}"] = ""
+
         # Load workbook and replace every {{PLACEHOLDER}} in every cell
         wb = openpyxl.load_workbook(io.BytesIO(resp.content))
         placeholder_re = re.compile(r'\{\{([A-Z0-9_]+)\}\}')
