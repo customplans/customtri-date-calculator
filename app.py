@@ -1,7 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from datetime import date, timedelta
 import math
+import io
+import re
+import requests
+import openpyxl
 
 app = Flask(__name__)
 CORS(app)
@@ -75,44 +79,30 @@ def calculate():
         generated_date_str = data.get("generated_date", "")
         race_distance = data.get("race_distance", "Full Ironman 140.6")
 
-        # Parse dates
         race_date = parse_date(race_date_str)
         generated_date = parse_date(generated_date_str)
 
-        # Get distance limits
         distance_key = get_distance_key(race_distance)
         limits = DISTANCE_LIMITS[distance_key]
         taper_weeks = get_taper_weeks(distance_key)
 
-        # Calculate final week Monday
         final_week_monday = get_final_week_monday(race_date)
-
-        # Calculate first Monday on or after generated date
         first_monday = get_first_monday(generated_date)
-
-        # Calculate total weeks (inclusive of race week)
         days_between = (final_week_monday - first_monday).days
         total_weeks = (days_between // 7) + 1
 
-        # Apply distance limits
         compressed = False
         if total_weeks > limits["max"]:
             total_weeks = limits["max"]
         elif total_weeks < limits["min"]:
             compressed = True
 
-        # Calculate Week 1 Monday
         week1_monday = final_week_monday - timedelta(weeks=total_weeks - 1)
-
-        # Derive race day of week
         days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         race_day_of_week = days_of_week[race_date.weekday()]
-
-        # Calculate taper week number
         taper_week_number = total_weeks - taper_weeks + 1
         taper_week = f"Week {taper_week_number}"
 
-        # Build compressed timeline message
         if compressed:
             compressed_message = (
                 f"Your race date gives you {total_weeks} weeks to train. "
@@ -123,7 +113,6 @@ def calculate():
         else:
             compressed_message = ""
 
-        # Build all 32 week dates
         week_dates = {}
         for wk in range(1, 33):
             wk_str = f"{wk:02d}"
@@ -145,7 +134,6 @@ def calculate():
                 week_dates[f"WK{wk_str}_D6"] = ""
                 week_dates[f"WK{wk_str}_D7"] = ""
 
-        # Build calendar summary -- single string for Claude
         lines = [
             "PRE-CALCULATED CALENDAR DATA -- USE THESE EXACTLY, DO NOT RECALCULATE:",
             f"TOTAL_WEEKS: {total_weeks}",
@@ -175,7 +163,6 @@ def calculate():
 
         calendarsummary = "\n".join(lines)
 
-        # Build response
         result = {
             "total_weeks": str(total_weeks),
             "taper_week": taper_week,
@@ -195,7 +182,6 @@ def calculate():
         return jsonify({"error": str(e)}), 400
 
 
-
 @app.route("/validate", methods=["POST"])
 def validate():
     """
@@ -212,7 +198,6 @@ def validate():
         unavailable_days = data.get("unavailable_days", [])
         total_weeks = int(data.get("total_weeks", 32))
 
-        # Normalize unavailable days to title case
         unavailable_days = [d.strip().title() for d in unavailable_days]
 
         day_to_key = {
@@ -248,6 +233,78 @@ def validate():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+@app.route("/fill_template", methods=["POST"])
+def fill_template():
+    try:
+        data = request.get_json(force=True, silent=False)
+        if data is None:
+            return jsonify({"error": "No JSON received"}), 400
+
+        claude_output = data.get("claude_output", {})
+        date_data = data.get("date_data", {})
+        template_url = data.get("template_url", "")
+
+        if not template_url:
+            return jsonify({"error": "template_url is required"}), 400
+
+        # Ensure Dropbox share links force direct download
+        if "dropbox.com" in template_url:
+            template_url = template_url.replace("dl=0", "dl=1")
+            if "dl=1" not in template_url:
+                sep = "&" if "?" in template_url else "?"
+                template_url += sep + "dl=1"
+
+        # Download the template
+        resp = requests.get(template_url, timeout=30)
+        resp.raise_for_status()
+
+        # Build substitution dict from Claude output (all keys uppercased)
+        subs = {k.upper(): (str(v) if v is not None else "") for k, v in claude_output.items()}
+
+        # Override every date field with authoritative values from /calculate
+        # date_data has WK01_D1 ... WK32_D7; template uses {{WK01_D1_DATE}} etc.
+        for wk in range(1, 33):
+            wk_str = f"{wk:02d}"
+            for day_num in range(1, 8):
+                calc_key = f"WK{wk_str}_D{day_num}"
+                subs[f"WK{wk_str}_D{day_num}_DATE"] = str(date_data.get(calc_key, ""))
+
+        # Add remaining date_data fields (total_weeks, taper_week, etc.)
+        # without overwriting anything already in subs
+        for k, v in date_data.items():
+            upper_k = k.upper()
+            if upper_k not in subs:
+                subs[upper_k] = str(v) if v is not None else ""
+
+        # Load workbook and replace every {{PLACEHOLDER}} in every cell
+        wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+        placeholder_re = re.compile(r'\{\{([A-Z0-9_]+)\}\}')
+
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str) and "{{" in cell.value:
+                        cell.value = placeholder_re.sub(
+                            lambda m: subs.get(m.group(1), ""),
+                            cell.value
+                        )
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name="training_plan.xlsx"
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
 
 @app.route("/health", methods=["GET"])
 def health():
