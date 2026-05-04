@@ -324,6 +324,17 @@ def fill_template():
                             cell.value
                         )
 
+        # Apply print settings to the Training Plan sheet
+        if "customtri_template_v3" in wb.sheetnames:
+            from openpyxl.worksheet.pagebreak import Break
+            ws = wb["customtri_template_v3"]
+            ws.print_title_rows = "1:5"
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            # Page breaks every 4 weeks (every 8 rows after row 5)
+            for break_row in [13, 21, 29, 37, 45, 53, 61]:
+                ws.row_breaks.append(Break(id=break_row))
+
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
